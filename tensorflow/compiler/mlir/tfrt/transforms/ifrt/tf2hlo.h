@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -43,12 +44,15 @@ namespace ifrt_serving {
 
 struct Tf2HloArg {
   mlir::ModuleOp module;
-  absl::Span<const DtypeAndShape> input_dtypes_and_shapes;
+  // This can be mutable during Tf2HLO compilation.
+  std::vector<DtypeAndShape>* input_dtypes_and_shapes;
+  absl::Span<const int> variable_arg_indices;
   absl::string_view entry_function_name;
   tensorflow::tpu::TPUCompileMetadataProto compile_metadata;
   tensorflow::XlaHelpers::ShapeRepresentationFn shape_representation_fn;
   std::shared_ptr<xla::ifrt::Topology> topology;
   absl::string_view platform_name;
+  bool enable_r1_optimization = true;
 
   absl::StatusOr<uint64_t> Fingerprint() const;
 };
@@ -76,7 +80,7 @@ class TfToHloCompiler {
   // CompileTfToHlo.
   virtual absl::StatusOr<std::string> Key(const Tf2HloArg& arg);
 
-  virtual absl::StatusOr<Tf2HloResult> CompileTfToHlo(const Tf2HloArg& arg);
+  virtual absl::StatusOr<Tf2HloResult> CompileTfToHlo(Tf2HloArg& arg);
 };
 
 }  // namespace ifrt_serving

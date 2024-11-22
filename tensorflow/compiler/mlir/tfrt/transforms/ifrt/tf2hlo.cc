@@ -27,16 +27,27 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/LogicalResult.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/Attributes.h"  // from @llvm-project
+#include "mlir/IR/Builders.h"  // from @llvm-project
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
+#include "mlir/IR/Location.h"  // from @llvm-project
 #include "mlir/IR/OperationSupport.h"  // from @llvm-project
 #include "mlir/IR/OwningOpRef.h"  // from @llvm-project
+#include "mlir/IR/Types.h"  // from @llvm-project
+#include "mlir/IR/Value.h"  // from @llvm-project
 #include "mlir/IR/Visitors.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
+#include "mlir/Support/LLVM.h"  // from @llvm-project
+#include "third_party/protobuf/text_format.h"
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_dialect.h"
+#include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.h"
+#include "tensorflow/compiler/mlir/tensorflow/utils/convert_type.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/dump_mlir_util.h"
 #include "tensorflow/compiler/mlir/tensorflow/utils/serialize_mlir_module_utils.h"
 #include "tensorflow/compiler/mlir/tf2xla/api/v2/legalize_tf.h"
@@ -62,6 +73,7 @@ limitations under the License.
 #include "tensorflow/core/protobuf/tpu/compile_metadata.pb.h"
 #include "tensorflow/core/protobuf/tpu/topology.pb.h"
 #include "tensorflow/core/tpu/kernels/tpu_compile_op_support.h"
+#include "tsl/platform/errors.h"
 #include "tsl/platform/fingerprint.h"
 #include "tsl/platform/statusor.h"
 
@@ -91,20 +103,23 @@ absl::StatusOr<uint64_t> Tf2HloArg::Fingerprint() const {
   }
   fingerprint =
       tsl::FingerprintCat64(fingerprint, MlirModuleFingerprint(module));
-  for (const auto& dtype_and_shape : input_dtypes_and_shapes) {
-    fingerprint = tsl::FingerprintCat64(
-        fingerprint,
-        tsl::Fingerprint64(tensorflow::DataType_Name(dtype_and_shape.dtype)));
+  if (input_dtypes_and_shapes) {
+    for (const auto& dtype_and_shape : *input_dtypes_and_shapes) {
+      fingerprint = tsl::FingerprintCat64(
+          fingerprint,
+          tsl::Fingerprint64(tensorflow::DataType_Name(dtype_and_shape.dtype)));
 
-    std::string serialized_shape;
-    if (!tsl::SerializeToStringDeterministic(dtype_and_shape.shape.AsProto(),
-                                             &serialized_shape)) {
-      return absl::InternalError("Failed to serialize shape");
+      std::string serialized_shape;
+      if (!tsl::SerializeToStringDeterministic(dtype_and_shape.shape.AsProto(),
+                                               &serialized_shape)) {
+        return absl::InternalError("Failed to serialize shape");
+      }
+
+      fingerprint = tsl::FingerprintCat64(fingerprint,
+                                          tsl::Fingerprint64(serialized_shape));
     }
-
-    fingerprint = tsl::FingerprintCat64(fingerprint,
-                                        tsl::Fingerprint64(serialized_shape));
   }
+
   fingerprint = tsl::FingerprintCat64(fingerprint,
                                       tsl::Fingerprint64(entry_function_name));
   std::string serialized_compile_metadata;
@@ -205,8 +220,8 @@ absl::StatusOr<tensorflow::tpu::TPUCompileMetadataProto> GetCompileMetadata(
 }
 
 absl::StatusOr<Tf2HloResult> CompileTfToHlo(const Tf2HloArg& arg) {
-  if (VLOG_IS_ON(1)) {
-    tensorflow::DumpMlirOpToFile("ifrt_before_bridge_phase2", arg.module);
+  if (!arg.input_dtypes_and_shapes) {
+    return absl::InvalidArgumentError("input_dtypes_and_shapes cannot be null");
   }
 
   // Device_type is a string of
@@ -232,7 +247,7 @@ absl::StatusOr<Tf2HloResult> CompileTfToHlo(const Tf2HloArg& arg) {
 
 
   std::vector<TensorShape> arg_shapes;
-  for (const auto& input : arg.input_dtypes_and_shapes) {
+  for (const auto& input : *arg.input_dtypes_and_shapes) {
     arg_shapes.push_back(input.shape);
   }
 
@@ -269,8 +284,7 @@ absl::StatusOr<Tf2HloResult> CompileTfToHlo(const Tf2HloArg& arg) {
   return result;
 }
 
-absl::StatusOr<Tf2HloResult> TfToHloCompiler::CompileTfToHlo(
-    const Tf2HloArg& arg) {
+absl::StatusOr<Tf2HloResult> TfToHloCompiler::CompileTfToHlo(Tf2HloArg& arg) {
   return tensorflow::ifrt_serving::CompileTfToHlo(arg);
 }
 
